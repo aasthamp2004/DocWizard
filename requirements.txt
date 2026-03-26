@@ -1,0 +1,35 @@
+# ── Web framework ─────────────────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+streamlit>=1.40.0
+pydantic>=2.0.0
+python-multipart>=0.0.9
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# ── Azure OpenAI / LangChain ──────────────────────────────────────────────────
+openai>=1.30.0
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-core>=0.3.0
+langgraph>=0.2.0
+langgraph-checkpoint>=2.0.0
+
+# ── DocForge storage ──────────────────────────────────────────────────────────
+psycopg2-binary>=2.9.0
+redis>=5.0.0
+
+# ── CiteRAG storage ───────────────────────────────────────────────────────────
+chromadb>=0.5.0
+
+# ── Document generation ───────────────────────────────────────────────────────
+openpyxl>=3.1.0
+python-docx>=1.1.0
+
+# ── CiteRAG evaluation ────────────────────────────────────────────────────────
+ragas>=0.1.0
+datasets>=2.14.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+pandas>=2.0.0
+notion-client>=2.2.0
