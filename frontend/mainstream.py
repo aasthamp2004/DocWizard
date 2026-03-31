@@ -10,7 +10,7 @@ import pandas as pd
 BACKEND         = os.getenv("BACKEND_URL", "http://127.0.0.1:9000")
 CITERAG_BACKEND = BACKEND + "/rag"  # CiteRAG routes now on same backend
 
-st.set_page_config(page_title="DocWizard is here", page_icon="🪄", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="DocWizard", page_icon="🪄", layout="wide", initial_sidebar_state="expanded")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CSS — Navy + Gold theme
@@ -822,6 +822,7 @@ with st.sidebar:
         "─────────────────",
         "🤖  Assistant",
         "🎫  My Tickets",
+        "📝  Assistant Log",
     ], label_visibility="collapsed")
     st.markdown("---")
     # Show CiteRAG index stats when on a CiteRAG page
@@ -878,8 +879,8 @@ if page == "📚  Document History":
 
 st.markdown("""
 <div class="page-header">
-    <h1>⚡ DocWizard</h1>
-    <p>Generate professional Word documents and Excel spreadsheets using AI — in seconds.</p>
+    <h1>⚡ DocWizard </h1>
+    <p>Conjure professional Word documents and Excel spreadsheets using AI — in seconds.</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1694,10 +1695,27 @@ def _cr_check_backend():
 if page == "🤖  Assistant":
     st.markdown("""
     <div class="page-header">
-        <h1>🤖 StateCase Assistant</h1>
+        <h1>🤖 DocWizard Assistant</h1>
         <p>Stateful AI assistant — asks clarifying questions, answers from your docs, and raises tickets when it can't.</p>
     </div>
     """, unsafe_allow_html=True)
+
+    # ── Index status check ────────────────────────────────────────────────────
+    try:
+        _idx_check = requests.get(f"{CITERAG_BACKEND}/ingest/status", timeout=2)
+        if _idx_check.status_code == 200:
+            _idx_docs = _idx_check.json().get("documents", [])
+            if not _idx_docs:
+                st.warning(
+                    "⚠️ **No documents indexed yet.** The assistant retrieves answers from "
+                    "your Notion documents. Push documents to Notion first, then they will "
+                    "be auto-ingested. Until then, all questions will create tickets."
+                )
+            else:
+                _idx_chunks = sum(d.get("chunk_count", 0) for d in _idx_docs)
+                st.caption(f"📚 {len(_idx_docs)} document(s) · {_idx_chunks:,} chunks indexed and available")
+    except Exception:
+        pass
 
     # ── Session controls ──────────────────────────────────────────────────────
     _a_col1, _a_col2, _a_col3 = st.columns([3, 1.5, 1.5])
@@ -1908,6 +1926,121 @@ if page == "🎫  My Tickets":
                         f'style="font-size:0.82rem;color:#60a5fa;">Open in Notion ↗</a>',
                         unsafe_allow_html=True
                     )
+    st.stop()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE: Assistant Log
+# ─────────────────────────────────────────────────────────────────────────────
+
+if page == "📝  Assistant Log":
+    st.markdown("""
+    <div class="page-header">
+        <h1>📝 Assistant Log</h1>
+        <p>Every assistant conversation — questions, answers, sources and outcomes — saved to Notion.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    _al_c1, _al_c2 = st.columns([2, 1])
+    with _al_c1:
+        _al_limit = st.slider("Entries to load", 10, 100, 30, key="al_limit")
+    with _al_c2:
+        if st.button("🔄 Refresh", key="al_refresh"):
+            st.rerun()
+
+    with st.spinner("Loading assistant log..."):
+        _al_res = requests.get(f"{BACKEND}/assistant/log", params={"limit": _al_limit}, timeout=10)
+
+    if _al_res.status_code != 200:
+        st.error(f"Could not load assistant log: {_al_res.text[:200]}")
+        st.stop()
+
+    _al_entries = _al_res.json().get("entries", [])
+
+    if not _al_entries:
+        st.info("No entries yet. Start a conversation in the 🤖 Assistant tab.")
+        st.stop()
+
+    # Filter bar
+    _al_f1, _al_f2 = st.columns(2)
+    with _al_f1:
+        _al_outcome_filter = st.selectbox(
+            "Filter by outcome", ["All", "Answered", "Ticket Created", "Clarification Asked"],
+            key="al_outcome", label_visibility="collapsed"
+        )
+    with _al_f2:
+        _al_intent_filter = st.selectbox(
+            "Filter by intent", ["All", "question", "generate", "compare", "clarification", "chitchat"],
+            key="al_intent", label_visibility="collapsed"
+        )
+
+    if _al_outcome_filter != "All":
+        _al_entries = [e for e in _al_entries if e.get("outcome") == _al_outcome_filter]
+    if _al_intent_filter != "All":
+        _al_entries = [e for e in _al_entries if e.get("intent") == _al_intent_filter]
+
+    st.markdown(f'<p style="color:#7a94b8;font-size:0.88rem;">{len(_al_entries)} entr(ies)</p>', unsafe_allow_html=True)
+    st.markdown("---")
+
+    _outcome_colors = {
+        "Answered":            "#22c55e",
+        "Ticket Created":      "#ef4444",
+        "Clarification Asked": "#f59e0b",
+    }
+    _intent_colors = {
+        "question":      "#3b82f6",
+        "generate":      "#22c55e",
+        "compare":       "#9b7cf4",
+        "clarification": "#f59e0b",
+        "chitchat":      "#6b7280",
+    }
+
+    for _i, _entry in enumerate(_al_entries):
+        _oc  = _outcome_colors.get(_entry.get("outcome", ""), "#6b7280")
+        _ic  = _intent_colors.get(_entry.get("intent", ""), "#6b7280")
+        _ts  = _entry.get("asked_at", "")
+        _conf = _entry.get("confidence", 0)
+        _conf_color = _cr_score_color(_conf) if _conf else "#4a6080"
+
+        with st.expander(
+            f"🤖 {_entry.get('question', '')[:80]}  —  {_ts}",
+            expanded=(_i == 0)
+        ):
+            # Badges row
+            _al_badges = (
+                f'<span style="padding:2px 10px;border-radius:12px;font-size:0.68rem;font-weight:700;'                f'background:{_oc}22;color:{_oc};border:1px solid {_oc}55;margin-right:6px;">'                f'{_entry.get("outcome","")}</span>'                f'<span style="padding:2px 10px;border-radius:12px;font-size:0.68rem;font-weight:700;'                f'background:{_ic}22;color:{_ic};border:1px solid {_ic}55;margin-right:6px;">'                f'{_entry.get("intent","")}</span>'
+            )
+            if _conf:
+                _al_badges += (
+                    f'<span style="padding:2px 10px;border-radius:12px;font-size:0.68rem;font-weight:700;'                    f'background:{_conf_color}22;color:{_conf_color};border:1px solid {_conf_color}55;">'                    f'Confidence: {_conf:.0%}</span>'
+                )
+            st.markdown(_al_badges, unsafe_allow_html=True)
+            st.markdown("")
+
+            st.markdown("**Reply**")
+            _reply_html = _entry.get("reply", "").replace("\n", "<br>")
+            st.markdown(
+                f'<div style="background:#0f1c2e;border:1px solid #1e3a5f;border-radius:8px;'                f'padding:14px 18px;margin:6px 0;color:#e2e8f0;line-height:1.7;font-size:0.85rem;">'                f'{_reply_html}</div>',
+                unsafe_allow_html=True
+            )
+
+            if _entry.get("sources") and _entry["sources"] != "None":
+                st.markdown("**Sources**")
+                for _sl in _entry["sources"].split("\n"):
+                    if _sl.strip():
+                        st.markdown(
+                            f'<div style="background:#111827;border:1px solid #1e3a5f;'                            f'border-left:3px solid #1a56db;border-radius:6px;'                            f'padding:6px 12px;margin-bottom:4px;font-size:0.8rem;color:#94a3b8;">'                            f'{_sl}</div>',
+                            unsafe_allow_html=True
+                        )
+
+            if _entry.get("thread_id"):
+                st.caption(f"Thread: {_entry['thread_id'][:8]}...")
+            if _entry.get("url"):
+                _al_url = _entry["url"]
+                st.markdown(
+                    f'<a href="{_al_url}" target="_blank" style="font-size:0.78rem;color:#60a5fa;">'                    f'Open in Notion ↗</a>',
+                    unsafe_allow_html=True
+                )
     st.stop()
 
 
@@ -2251,7 +2384,7 @@ if page == "⚖️  Compare":
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PAGE: Evaluate
+# PAGE: Eval Lab
 # ─────────────────────────────────────────────────────────────────────────────
 
 if page == "🟰  Evaluate":
@@ -2383,9 +2516,10 @@ if page == "📋  CiteRAG Log":
                     # Type badge styling
                     _etype = entry.get("type", "Ask")
                     _type_styles = {
-                        "Ask":     ("#3b82f6", "💬"),
-                        "Compare": ("#9b7cf4", "⚖️"),
-                        "Eval":    ("#f5c842", "🟰"),
+                        "Ask":       ("#3b82f6", "💬"),
+                        "Compare":   ("#9b7cf4", "⚖️"),
+                        "Eval":      ("#f5c842", "🧪"),
+                        "Assistant": ("#22c55e", "🤖"),
                     }
                     _tc, _te = _type_styles.get(_etype, ("#3b82f6", "💬"))
 

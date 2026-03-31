@@ -49,9 +49,10 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 # ── Assistant imports ─────────────────────────────────────────────────────────
-from backend.services.p3.state        import init_assistant_table, list_threads
-from backend.services.p3.graph        import run_turn
-from backend.services.p3.tickets import fetch_tickets, update_ticket_status
+from backend.services.p3.state             import init_assistant_table, list_threads
+from backend.services.p3.graph             import run_turn
+from backend.services.p3.tickets    import fetch_tickets, update_ticket_status
+from backend.services.p3.assistant_log import fetch_assistant_log
 
 # ── Ingest config ─────────────────────────────────────────────────────────────
 INGEST_POLL_INTERVAL = 15 * 60   # check Notion for new/updated docs every 15 min
@@ -115,6 +116,12 @@ async def lifespan(app: FastAPI):
     # CiteRAG — ChromaDB + SQLite
     init_chroma_db()
     log.info("CiteRAG ChromaDB + SQLite ready")
+    # Assistant — thread state table
+    try:
+        init_assistant_table()
+        log.info("Assistant thread table ready")
+    except Exception as _e:
+        log.error(f"init_assistant_table failed: {_e}")
     # Startup ingest — skips docs already indexed and unchanged
     threading.Thread(target=_auto_ingest, daemon=True).start()
     # Periodic poll — re-checks every INGEST_POLL_INTERVAL minutes
@@ -521,6 +528,36 @@ def health():
     return {"status": "ok", "service": "DocForgeHub", "redis": redis_svc.is_available()}
 
 
+@app.get("/assistant/debug/retrieval")
+def debug_retrieval(q: str = "agile team participants", top_k: int = 5):
+    """
+    Debug endpoint: test what the assistant retrieves for a query.
+    GET /assistant/debug/retrieval?q=who+are+agile+team+members
+    """
+    try:
+        # Try p2 path first
+        try:
+            from backend.services.p2.retrieval import search
+        except ImportError:
+            from backend.services.p2.retrieval import search
+        results = search(query=q, top_k=top_k)
+        return {
+            "query":   q,
+            "total":   len(results),
+            "chunks":  [
+                {
+                    "doc_title":    r.get("doc_title"),
+                    "section_name": r.get("section_name"),
+                    "score":        r.get("score"),
+                    "preview":      r.get("chunk_text", "")[:120],
+                }
+                for r in results
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ASSISTANT ROUTES  (mounted under /assistant prefix)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -609,6 +646,16 @@ def update_ticket(ticket_id: str, payload: dict):
     try:
         update_ticket_status(ticket_id, status)
         return {"message": f"Ticket {ticket_id} updated to '{status}'"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@asst.get("/log")
+def get_assistant_log(limit: int = 50):
+    """Fetch assistant conversation log from Notion Assistant Log DB."""
+    try:
+        entries = fetch_assistant_log(limit=limit)
+        return {"entries": entries, "total": len(entries)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

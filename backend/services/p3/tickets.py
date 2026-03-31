@@ -2,7 +2,7 @@
 ticket_service.py
 ------------------
 Creates and manages support tickets in a Notion database:
-  "DocForgeHub Support Tickets"
+  "StateCase Support Tickets"
 
 Ticket schema:
   Title       — question / issue summary (title property)
@@ -38,7 +38,7 @@ NOTION_HEADERS = {
     "Content-Type":   "application/json",
 }
 BASE_URL    = "https://api.notion.com/v1"
-DB_NAME     = "DocForgeHub Support Tickets"
+DB_NAME     = "StateCase Support Tickets"
 IST         = timezone(timedelta(hours=5, minutes=30))
 
 _ticket_db_id = None
@@ -131,10 +131,7 @@ def _get_or_create_ticket_db() -> str:
 # ── Idempotency check ─────────────────────────────────────────────────────────
 
 def find_ticket_by_thread(thread_id: str) -> dict | None:
-    """
-    Check if a ticket already exists for this thread_id.
-    Returns the Notion page dict or None.
-    """
+    """Check if a ticket already exists for this thread_id."""
     try:
         db_id = _get_or_create_ticket_db()
         results = _notion("post", f"{BASE_URL}/databases/{db_id}/query", json={
@@ -147,6 +144,65 @@ def find_ticket_by_thread(thread_id: str) -> dict | None:
         return results[0] if results else None
     except Exception as e:
         log.warning(f"find_ticket_by_thread failed: {e}")
+        return None
+
+
+def _normalise_question(q: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace for fuzzy matching."""
+    import re
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", q.lower())).strip()
+
+
+def find_ticket_by_question(question: str, status_filter: str = None) -> dict | None:
+    """
+    Check if an Open/In-Progress ticket with a very similar question already exists.
+    Compares normalised question text — prevents duplicate tickets for the
+    same unanswered query asked in different sessions.
+
+    status_filter: if set, only match tickets with that status.
+    """
+    try:
+        db_id  = _get_or_create_ticket_db()
+        # Fetch recent Open + In Progress tickets to compare against
+        filter_payload = {
+            "or": [
+                {"property": "Status", "select": {"equals": "Open"}},
+                {"property": "Status", "select": {"equals": "In Progress"}},
+            ]
+        }
+        if status_filter:
+            filter_payload = {"property": "Status", "select": {"equals": status_filter}}
+
+        results = _notion("post", f"{BASE_URL}/databases/{db_id}/query", json={
+            "filter":    filter_payload,
+            "page_size": 50,
+            "sorts":     [{"property": "Created At", "direction": "descending"}],
+        }).get("results", [])
+
+        norm_q = _normalise_question(question)
+
+        for page in results:
+            props = page.get("properties", {})
+            existing_q_arr = props.get("Question", {}).get("rich_text", [])
+            existing_q = existing_q_arr[0].get("plain_text", "") if existing_q_arr else ""
+            norm_existing = _normalise_question(existing_q)
+
+            # Exact match after normalisation
+            if norm_q == norm_existing:
+                log.info(f"Duplicate ticket found (exact question match): {page['id']}")
+                return page
+
+            # Fuzzy match: if one is a substring of the other (handles slight rewording)
+            if len(norm_q) > 20 and len(norm_existing) > 20:
+                shorter = norm_q if len(norm_q) < len(norm_existing) else norm_existing
+                longer  = norm_existing if len(norm_q) < len(norm_existing) else norm_q
+                if shorter in longer:
+                    log.info(f"Duplicate ticket found (substring match): {page['id']}")
+                    return page
+
+        return None
+    except Exception as e:
+        log.warning(f"find_ticket_by_question failed: {e}")
         return None
 
 
@@ -167,13 +223,23 @@ def create_ticket(
 
     Returns { ticket_id, url, existed }
     """
-    # Idempotency check
+    # Idempotency check 1: same thread
     existing = find_ticket_by_thread(thread_id)
     if existing:
         log.info(f"Ticket already exists for thread {thread_id}: {existing['id']}")
         return {
             "ticket_id": existing["id"],
             "url":       existing.get("url", ""),
+            "existed":   True,
+        }
+
+    # Idempotency check 2: same question in another open/in-progress ticket
+    existing_q = find_ticket_by_question(question)
+    if existing_q:
+        log.info(f"Duplicate question ticket found: {existing_q['id']} — skipping creation")
+        return {
+            "ticket_id": existing_q["id"],
+            "url":       existing_q.get("url", ""),
             "existed":   True,
         }
 

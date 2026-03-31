@@ -124,6 +124,21 @@ def ask_clarification(state: dict) -> dict:
         "content":   q,
         "timestamp": _now(),
     })
+    # Log clarification turn to Notion
+    try:
+        from backend.services.p3.assistant_log import log_turn
+        last_user = next((m["content"] for m in reversed(state.get("messages", []))
+                          if m["role"] == "user"), "")
+        log_turn(
+            question  = last_user,
+            reply     = q,
+            thread_id = state.get("thread_id", ""),
+            intent    = state.get("intent", "clarification"),
+            outcome   = "Clarification Asked",
+        )
+    except Exception as _le:
+        log.warning(f"assistant log_turn (clarify) failed: {_le}")
+
     return {
         "messages":              messages,
         "pending_clarification": True,
@@ -143,23 +158,31 @@ def _generate_clarification(state: dict) -> str:
 
 # ── Node: retrieve ────────────────────────────────────────────────────────────
 
+def _do_search(query: str, top_k: int = 6, filters: dict = None) -> list[dict]:
+    """
+    Flexible search that tries multiple import paths to find the working retrieval.
+    Tries p2.retrieval first (project structure), falls back to retrieval_service.
+    """
+    # Try p2 path first (matches main.py's working imports)
+    try:
+        from backend.services.p2.retrieval import search
+        return search(query=query, top_k=top_k, filters=filters)
+    except (ImportError, ModuleNotFoundError):
+        pass
+    # Fall back to flat services path
+    try:
+        from backend.services.p2.retrieval import search
+        return search(query=query, top_k=top_k, filters=filters)
+    except Exception as e:
+        log.error(f"All retrieval imports failed: {e}")
+        return []
+
+
 def retrieve(state: dict) -> dict:
     """
     Retrieve relevant chunks from ChromaDB using the latest user message.
     Applies industry + doc_filters from state.
     """
-    try:
-        from backend.services.p2.retrieval import search_multi_query
-    except ImportError:
-        from backend.services.p2.retrieval import search as _search
-        def search_multi_query(queries, top_k=6, filters=None):
-            seen = {}
-            for q in queries:
-                for r in _search(q, top_k=top_k, filters=filters):
-                    if r["id"] not in seen or r["score"] > seen[r["id"]]["score"]:
-                        seen[r["id"]] = r
-            return sorted(seen.values(), key=lambda x: x["score"], reverse=True)[:top_k*2]
-
     messages  = state.get("messages", [])
     last_user = next((m["content"] for m in reversed(messages)
                       if m["role"] == "user"), "")
@@ -168,17 +191,29 @@ def retrieve(state: dict) -> dict:
     filters = dict(state.get("doc_filters", {}))
     if state.get("industry") and "industry" not in filters:
         filters["industry"] = state["industry"]
+    filters = filters or None
 
-    # Multi-query retrieval for better coverage
+    # Try query expansion; fall back to original query if it fails
     queries = _expand_query(last_user)
-    chunks  = search_multi_query(
-        queries  = queries,
-        top_k    = 6,
-        filters  = filters or None,
-    )
 
-    log.info(f"[{state.get('trace_id','')}] retrieved {len(chunks)} chunks "
-             f"for query: {last_user[:60]}")
+    # Multi-query retrieval — merge and dedupe by chunk id
+    seen = {}
+    for q in queries:
+        for r in _do_search(q, top_k=8, filters=filters):
+            cid = r.get("id", "")
+            if cid not in seen or r.get("score", 0) > seen[cid].get("score", 0):
+                seen[cid] = r
+    chunks = sorted(seen.values(), key=lambda x: x.get("score", 0), reverse=True)[:12]
+
+    if chunks:
+        top_docs = list({c.get("doc_title", "") for c in chunks[:5]})
+        avg      = sum(c.get("score", 0) for c in chunks) / len(chunks)
+        log.info(f"[{state.get('trace_id','')}] retrieved {len(chunks)} chunks "
+                 f"avg_score={avg:.2f} from: {top_docs}")
+    else:
+        log.warning(f"[{state.get('trace_id','')}] NO chunks retrieved — "
+                    f"ChromaDB index may be empty or query embedding failed. "
+                    f"query={last_user[:80]}")
     return {"last_retrieved": chunks}
 
 
@@ -204,22 +239,62 @@ def _expand_query(question: str) -> list[str]:
 
 # ── Node: check_sufficiency ───────────────────────────────────────────────────
 
-# Phrases that indicate the LLM couldn't answer from context
-_CANNOT_ANSWER_PHRASES = [
-    "does not specify", "does not contain", "not mentioned",
-    "not found in", "no information", "cannot find", "not available",
-    "not provided", "not in the", "unable to find", "no relevant",
-    "not covered", "not stated", "not described", "not documented",
-    "context does not", "provided context does not",
-    "i don't have", "i do not have", "cannot determine",
-    "no document", "not addressed",
+# Strong signals that the LLM explicitly couldn't answer
+_CANNOT_ANSWER_STRONG = [
+    "provided context does not",
+    "context does not specify",
+    "context does not contain",
+    "context does not mention",
+    "not found in the provided",
+    "not available in the provided",
+    "not mentioned in the provided",
+    "not included in the provided",
+    "not covered in the provided",
+    "no information available in",
+    "cannot determine from the",
+    "unable to find this information",
+    "the documents do not contain",
+    "the documents do not mention",
+    "the documents do not specify",
+    "not present in the indexed",
+    "no relevant information found",
+]
+
+# Weak signals — only count if the answer is also very short (< 200 chars)
+_CANNOT_ANSWER_WEAK = [
+    "does not specify",
+    "not mentioned",
+    "not available",
+    "cannot find",
+    "not found",
+    "not covered",
+    "not stated",
+    "not documented",
+    "i don't have",
+    "i do not have",
+    "cannot determine",
 ]
 
 
 def _llm_could_not_answer(answer_text: str) -> bool:
-    """Return True if the LLM's answer signals it couldn't find the information."""
+    """
+    Return True only when the LLM clearly couldn't answer.
+    Uses strong phrases (any match) or weak phrases + short response.
+    Avoids false positives on answers that happen to contain these words
+    in the middle of a valid cited response.
+    """
     lower = answer_text.lower()
-    return any(phrase in lower for phrase in _CANNOT_ANSWER_PHRASES)
+
+    # Strong signal: explicit "provided context does not..." phrasing
+    if any(phrase in lower for phrase in _CANNOT_ANSWER_STRONG):
+        return True
+
+    # Weak signal: only escalate if the answer is also very short (no real content)
+    if len(answer_text.strip()) < 250:
+        if any(phrase in lower for phrase in _CANNOT_ANSWER_WEAK):
+            return True
+
+    return False
 
 
 def check_sufficiency(state: dict) -> Literal["answer", "ticket"]:
@@ -303,6 +378,24 @@ Be concise but complete. Use bullet points for lists.""")
 
     log.info(f"[{state.get('trace_id','')}] answer generated ({len(answer)} chars)")
 
+    # Log to Notion Assistant Log (non-blocking)
+    if not _llm_could_not_answer(answer):
+        try:
+            from backend.services.p3.assistant_log import log_turn
+            log_turn(
+                question  = last_user,
+                reply     = answer,
+                thread_id = state.get("thread_id", ""),
+                intent    = state.get("intent", "question"),
+                sources   = [{"doc_title": c["doc_title"],
+                               "section_name": c["section_name"],
+                               "score": c.get("score", 0)}
+                              for c in chunks],
+                outcome   = "Answered",
+            )
+        except Exception as _le:
+            log.warning(f"assistant log_turn failed (non-fatal): {_le}")
+
     # Post-answer check: if LLM couldn't find info, escalate to ticket
     if _llm_could_not_answer(answer):
         log.info(f"[{state.get('trace_id','')}] LLM could not answer — escalating to ticket")
@@ -330,6 +423,11 @@ def create_ticket_node(state: dict) -> dict:
     last_user = next((m["content"] for m in reversed(messages)
                       if m["role"] == "user"), "")
 
+    # Special case: no documents ingested at all
+    if not chunks:
+        log.warning(f"[{state.get('trace_id','')}] Ticket triggered with 0 chunks — "
+                    f"ChromaDB index may be empty")
+
     # Summarise conversation for the ticket
     summary = _summarise_conversation(messages)
 
@@ -349,16 +447,21 @@ def create_ticket_node(state: dict) -> dict:
         ticket_url = result["url"]
         existed    = result["existed"]
     except Exception as e:
-        log.error(f"Ticket creation failed: {e}")
+        import traceback
+        tb = traceback.format_exc()
+        log.error(f"Ticket creation failed: {e}\n{tb}")
         ticket_id  = None
         ticket_url = ""
         existed    = False
+        _ticket_err = str(e)
+    else:
+        _ticket_err = None
 
     # Compose response to user
     if existed:
         response_text = (
             "I wasn't able to find a confident answer in your documents. "
-            "A support ticket has already been raised for this thread — "
+            "A support ticket has already been raised for this question — "
             "our team will follow up.\n\n"
             f"🎫 [View your ticket]({ticket_url})"
         )
@@ -371,9 +474,21 @@ def create_ticket_node(state: dict) -> dict:
             "Our team will review and respond. You can track it in the **🎫 My Tickets** tab."
         )
     else:
+        # Show actual error so user/dev can diagnose
+        err_hint = ""
+        if _ticket_err:
+            if "NOTION_PAGE_ID" in _ticket_err:
+                err_hint = "\n\n⚠️ `NOTION_PAGE_ID` is not set in your `.env` file."
+            elif "Unauthorized" in _ticket_err or "401" in _ticket_err:
+                err_hint = "\n\n⚠️ Notion token is invalid or expired. Check `NOTION_TOKEN` in `.env`."
+            elif "404" in _ticket_err:
+                err_hint = "\n\n⚠️ Notion page not found. Check `NOTION_PAGE_ID` in `.env`."
+            else:
+                err_hint = f"\n\n⚠️ Error: `{_ticket_err[:200]}`"
         response_text = (
-            "I wasn't able to find a confident answer and ticket creation failed. "
-            "Please contact support directly."
+            "I wasn't able to find a confident answer from your documents, "
+            "but ticket creation also failed — please check your Notion configuration."
+            + err_hint
         )
 
     new_messages = list(messages)
@@ -386,6 +501,21 @@ def create_ticket_node(state: dict) -> dict:
     })
 
     log.info(f"[{state.get('trace_id','')}] ticket created: {ticket_id}")
+
+    # Log to Notion Assistant Log
+    try:
+        from backend.services.p3.assistant_log import log_turn
+        log_turn(
+            question  = last_user,
+            reply     = response_text,
+            thread_id = thread_id,
+            intent    = state.get("intent", "question"),
+            sources   = chunks,
+            outcome   = "Ticket Created",
+        )
+    except Exception as _le:
+        log.warning(f"assistant log_turn (ticket) failed: {_le}")
+
     return {
         "messages":  new_messages,
         "ticket_id": ticket_id,

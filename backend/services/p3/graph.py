@@ -46,8 +46,13 @@ def _route_after_classify(state: dict) -> Literal["ask_clarification", "retrieve
     return "retrieve"
 
 
-def _route_after_retrieve(state: dict) -> Literal["generate_answer", "create_ticket"]:
-    return check_sufficiency(state)
+def _route_after_retrieve(state: dict) -> Literal["answer", "ticket"]:
+    result = check_sufficiency(state)
+
+    if result in ["answer","ticket"]:
+        return result
+    
+    return "ticket"
 
 
 def _route_after_post_check(state: dict) -> Literal["create_ticket", "__end__"]:

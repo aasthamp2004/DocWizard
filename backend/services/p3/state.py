@@ -134,7 +134,7 @@ def init_assistant_table():
 
 
 def save_state(state: AssistantState):
-    """Persist full state to PostgreSQL."""
+    """Persist full state to PostgreSQL. Auto-creates table if missing."""
     conn = _get_conn()
     try:
         with conn.cursor() as cur:
@@ -150,6 +150,42 @@ def save_state(state: AssistantState):
                 json.dumps(state, default=str),
             ))
         conn.commit()
+    except Exception as e:
+        if "does not exist" in str(e):
+            # Table missing — create it and retry once
+            log.warning("assistant_threads missing — creating now")
+            conn.rollback()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS assistant_threads (
+                            thread_id   TEXT PRIMARY KEY,
+                            user_id     TEXT,
+                            state_json  JSONB NOT NULL DEFAULT '{}',
+                            created_at  TIMESTAMPTZ DEFAULT NOW(),
+                            updated_at  TIMESTAMPTZ DEFAULT NOW()
+                        )
+                    """)
+                conn.commit()
+                # Retry insert
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO assistant_threads (thread_id, user_id, state_json, updated_at)
+                        VALUES (%s, %s, %s::jsonb, NOW())
+                        ON CONFLICT (thread_id) DO UPDATE
+                            SET state_json = EXCLUDED.state_json,
+                                updated_at = NOW()
+                    """, (
+                        state["thread_id"],
+                        state.get("user_id"),
+                        json.dumps(state, default=str),
+                    ))
+                conn.commit()
+                log.info("assistant_threads created and state saved")
+            except Exception as retry_e:
+                log.error(f"save_state retry failed: {retry_e}")
+        else:
+            log.error(f"save_state failed: {e}")
     finally:
         _release_conn(conn)
 
