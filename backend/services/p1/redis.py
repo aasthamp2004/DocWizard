@@ -5,7 +5,7 @@ Complete Redis integration for DocForge — connection, caching,
 rate-limiting, backoff, and high-level service methods in one file.
 
 Usage:
-    from backend.services.redis_service import redis_svc
+    from backend.services.redis import redis_svc
 
     # Health
     redis_svc.is_available()
