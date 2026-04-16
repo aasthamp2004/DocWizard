@@ -25,18 +25,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 # ── DocForge imports ──────────────────────────────────────────────────────────
-from backend.services.p1.planner import plan_document
-from backend.services.p1.question import generate_questions
-from backend.services.p1.generator import generate_document_sections
+from backend.services.p1.for_planning import plan_document
+from backend.services.p1.for_questions import generate_questions
+from backend.services.p1.for_generation import generate_document_sections
 from backend.services.p1.excel_generator import generate_excel_sections, refine_excel_section
-from backend.services.p1.refinement import refine_section
+from backend.services.p1.for_refinement import refine_section
 from backend.services.p1.excel_exporter import generate_excel_file
-from backend.services.p1.notion import push_to_notion, update_notion_page
-from backend.database import (
+from backend.services.p1.for_notion import push_to_notion, update_notion_page
+from backend.the_database import (
     init_db, save_document, list_documents, get_document,
     delete_document, list_versions_by_id, delete_all_versions, get_latest_version
 )
-from backend.services.p1.redis import redis_svc, ThrottleExceeded
+from backend.services.p1.for_redis import redis_svc, ThrottleExceeded
 
 # ── CiteRAG imports ───────────────────────────────────────────────────────────
 from backend.chroma_db import (
@@ -49,9 +49,9 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 # ── Assistant imports ─────────────────────────────────────────────────────────
-from backend.services.p3.state             import init_assistant_table, list_threads
-from backend.services.p3.graph             import run_turn
-from backend.services.p3.tickets    import fetch_tickets, update_ticket_status
+from backend.services.p3.for_state             import init_assistant_table, list_threads
+from backend.services.p3.for_graph             import run_turn
+from backend.services.p3.for_tickets    import fetch_tickets, update_ticket_status
 from backend.services.p3.assistant_log import fetch_assistant_log
 
 # ── Ingest config ─────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ def _auto_ingest(page_ids: list = None, force: bool = False):
     against stored ingested_at — so unchanged docs cost only a metadata fetch.
     """
     try:
-        from backend.services.p2.ingestion import ingest_notion
+        from backend.services.p2.for_ingestion import ingest_notion
         if page_ids:
             log.info(f"Auto-ingest: syncing page(s) {page_ids}...")
         else:
@@ -414,7 +414,7 @@ def rename_doc(doc_id: int, payload: dict):
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     try:
-        from backend.database import get_conn, release_conn
+        from backend.the_database import get_conn, release_conn
         conn = get_conn()
         old_title = doc["title"]
         try:
@@ -537,9 +537,9 @@ def debug_retrieval(q: str = "agile team participants", top_k: int = 5):
     try:
         # Try p2 path first
         try:
-            from backend.services.p2.retrieval import search
+            from backend.services.p2.for_retrieval import search
         except ImportError:
-            from backend.services.p2.retrieval import search
+            from backend.services.p2.for_retrieval import search
         results = search(query=q, top_k=top_k)
         return {
             "query":   q,
@@ -602,7 +602,7 @@ def assistant_chat(payload: dict):
 @asst.get("/thread/{thread_id}")
 def get_thread(thread_id: str):
     """Return full conversation history for a thread."""
-    from backend.services.p3.memory import restore_state
+    from backend.services.p3.for_memory import restore_state
     state = restore_state(thread_id)
     if not state:
         raise HTTPException(status_code=404, detail="Thread not found")
@@ -618,7 +618,7 @@ def get_thread(thread_id: str):
 @asst.delete("/thread/{thread_id}")
 def clear_thread(thread_id: str):
     """Clear a conversation thread from Redis cache (keeps DB record)."""
-    from backend.services.p3.memory import invalidate_state
+    from backend.services.p3.for_memory import invalidate_state
     invalidate_state(thread_id)
     return {"message": f"Thread {thread_id} cleared from cache"}
 
@@ -677,7 +677,7 @@ def rag_health():
 
 @rag.post("/ingest")
 def rag_ingest(payload: dict = {}):
-    from backend.services.p2.ingestion import ingest_notion
+    from backend.services.p2.for_ingestion import ingest_notion
     try:
         page_ids = payload.get("page_ids") if payload else None
         force    = payload.get("force", False) if payload else False
@@ -705,7 +705,7 @@ def rag_delete_ingested(page_id: str):
 
 @rag.post("/search")
 def rag_search(payload: dict):
-    from backend.services.p2.retrieval import search as do_search
+    from backend.services.p2.for_retrieval import search as do_search
     try:
         query   = payload["query"]
         top_k   = payload.get("top_k", 5)
@@ -722,7 +722,7 @@ def rag_search(payload: dict):
 
 @rag.post("/ask")
 def rag_ask(payload: dict):
-    from backend.services.p2.qa import ask as do_ask
+    from backend.services.p2.for_qa import ask as do_ask
     from backend.services.p2.qa_log import log_qa
     try:
         question = payload["question"]
@@ -756,7 +756,7 @@ def rag_ask(payload: dict):
 
 @rag.post("/ask/refine")
 def rag_refine(payload: dict):
-    from backend.services.p2.qa import refine_answer
+    from backend.services.p2.for_qa import refine_answer
     try:
         return refine_answer(
             question = payload["question"],
@@ -779,7 +779,7 @@ def rag_qa_log(limit: int = 50):
 
 @rag.post("/compare")
 def rag_compare(payload: dict):
-    from backend.services.p2.compare import compare_documents
+    from backend.services.p2.for_comparison import compare_documents
     from backend.services.p2.qa_log import log_compare
     try:
         title_a = payload["title_a"]
@@ -818,7 +818,7 @@ def rag_documents():
 
 @rag.post("/eval/run")
 def rag_eval_run(payload: dict):
-    from backend.services.p2.eval import run_evaluation
+    from backend.services.p2.for_evaluation import run_evaluation
     from backend.services.p2.qa_log import log_eval
     try:
         config = payload.get("config", {})

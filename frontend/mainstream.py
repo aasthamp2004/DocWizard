@@ -1763,16 +1763,17 @@ if page == "🤖  Assistant":
 
     # ── Input box ─────────────────────────────────────────────────────────────
     st.markdown("")
-    _a_input_col, _a_send_col = st.columns([8, 1])
-    with _a_input_col:
-        _user_input = st.text_input(
-            "Message", key="asst_input",
-            placeholder="Ask anything about your documents... e.g. 'Draft a vendor onboarding SOP'",
-            label_visibility="collapsed"
-        )
-    with _a_send_col:
-        _send = st.button("⚡", key="asst_send", use_container_width=True,
-                          help="Send message", type="primary")
+    with st.form("asst_input_form", clear_on_submit=True):
+        _a_input_col, _a_send_col = st.columns([8, 1])
+        with _a_input_col:
+            _user_input = st.text_input(
+                "Message",
+                placeholder="Ask anything about your documents...",
+                label_visibility="collapsed"
+            )
+        with _a_send_col:
+            _send = st.form_submit_button("⚡", use_container_width=True,
+                                          help="Send message")
 
     if _send and _user_input.strip():
         with st.spinner("Thinking..."):
@@ -1791,8 +1792,6 @@ if page == "🤖  Assistant":
                     _data = _res.json()
                     st.session_state["asst_thread_id"] = _data["thread_id"]
                     st.session_state["asst_messages"]  = _data["messages"]
-                    # Clear input
-                    st.session_state.pop("asst_input", None)
                     st.rerun()
                 else:
                     st.error(f"Assistant error: {_res.text[:200]}")
@@ -1808,7 +1807,6 @@ if page == "🤖  Assistant":
             "Summarise the key clauses in our vendor agreements.",
             "What are employee leave entitlements?",
             "Compare our SOW and MSA documents.",
-            "Draft a vendor onboarding SOP for telecom.",
         ]
         _s_cols = st.columns(len(_suggestions))
         for _sc, _sq in zip(_s_cols, _suggestions):
@@ -2104,23 +2102,6 @@ if page == "💬  Ask Documents":
         </div>""", unsafe_allow_html=True)
         _cr_render_sources(last["sources"])
 
-        st.markdown("---")
-        st.markdown("**🔧 Refine this answer**")
-        feedback = st.text_input("What would you like changed?",
-            placeholder='e.g. "Make it more concise" or "Focus on financial implications"',
-            key="ask_feedback")
-        if st.button("Refine", key="ask_refine_btn"):
-            if feedback.strip():
-                with st.spinner("Refining..."):
-                    ref_res = requests.post(f"{CITERAG_BACKEND}/ask/refine", json={
-                        "question": last["question"], "answer": last["answer"],
-                        "feedback": feedback, "sources": last["sources"],
-                    })
-                if ref_res.status_code == 200:
-                    st.session_state["cr_last_ask"]["answer"] = ref_res.json()["answer"]
-                    st.rerun()
-                else:
-                    st.error(f"Refine failed: {ref_res.text[:200]}")
     st.stop()
 
 

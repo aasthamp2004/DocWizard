@@ -1,6 +1,6 @@
-from backend.services.p1.planner import generate_document_sections
-from backend.services.p1.question import generate_questions
-from backend.services.p1.generator import generate_document
+from backend.services.p1.for_planning import generate_document_sections
+from backend.services.p1.for_questions import generate_questions
+from backend.services.p1.for_generation import generate_document
 
 
 class DocumentOrchestrator:
