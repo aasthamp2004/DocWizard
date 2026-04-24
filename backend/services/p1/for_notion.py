@@ -13,6 +13,7 @@ import json
 import time
 import requests
 import logging
+import re
 from dotenv import load_dotenv
 from backend.services.p1.for_redis import redis_svc, ThrottleExceeded
 
@@ -199,6 +200,71 @@ def _table(headers: list, rows: list) -> dict:
 # Content → Notion blocks
 # ─────────────────────────────────────────────────────────────────────────────
 
+_MD_TABLE_SEPARATOR_RE = re.compile(
+    r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+(?:\s*:?-{3,}:?\s*)\|?\s*$"
+)
+
+
+def _split_markdown_table_cells(line: str) -> list[str]:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _parse_markdown_table(table_lines: list[str]) -> tuple[list[str], list[list[str]]] | None:
+    if len(table_lines) < 2 or not _MD_TABLE_SEPARATOR_RE.match(table_lines[1]):
+        return None
+
+    headers = _split_markdown_table_cells(table_lines[0])
+    rows = [_split_markdown_table_cells(line) for line in table_lines[2:] if line.strip()]
+    row_widths = [len(row) for row in rows]
+    width = max([len(headers)] + row_widths)
+
+    headers = headers + [""] * (width - len(headers))
+    rows = [row + [""] * (width - len(row)) for row in rows]
+    return headers, rows
+
+
+def _iter_markdown_blocks(content: str):
+    lines = content.splitlines()
+    i = 0
+
+    while i < len(lines):
+        if not lines[i].strip():
+            i += 1
+            continue
+
+        if (
+            i + 1 < len(lines)
+            and "|" in lines[i]
+            and _MD_TABLE_SEPARATOR_RE.match(lines[i + 1])
+        ):
+            table_lines = [lines[i], lines[i + 1]]
+            i += 2
+            while i < len(lines) and lines[i].strip():
+                if "|" not in lines[i]:
+                    break
+                table_lines.append(lines[i])
+                i += 1
+            yield ("table", table_lines)
+            continue
+
+        text_lines = []
+        while i < len(lines) and lines[i].strip():
+            if (
+                i + 1 < len(lines)
+                and "|" in lines[i]
+                and _MD_TABLE_SEPARATOR_RE.match(lines[i + 1])
+            ):
+                break
+            text_lines.append(lines[i].strip())
+            i += 1
+        yield ("text", text_lines)
+
+
 def _word_doc_to_blocks(sections: dict) -> list:
     """Convert Word document sections dict to Notion block list."""
     blocks = []
@@ -216,11 +282,19 @@ def _word_doc_to_blocks(sections: dict) -> list:
             blocks.append(_heading2(section_name.replace("_", " ").title()))
 
         if isinstance(content, str):
-            for line in [l.strip() for l in content.split("\n") if l.strip()]:
-                if line.startswith(("-", "*", "•", "▸")):
-                    blocks.append(_bullet(line.lstrip("-*•▸ ")))
-                else:
-                    blocks.append(_paragraph(line))
+            for block_type, block_lines in _iter_markdown_blocks(content):
+                if block_type == "table":
+                    parsed_table = _parse_markdown_table(block_lines)
+                    if parsed_table:
+                        headers, rows = parsed_table
+                        blocks.append(_table(headers, rows))
+                        continue
+
+                for line in block_lines:
+                    if line.startswith(("-", "*", "•", "▸")):
+                        blocks.append(_bullet(line.lstrip("-*•▸ ")))
+                    else:
+                        blocks.append(_paragraph(line))
 
         elif isinstance(content, list):
             for item in content:
